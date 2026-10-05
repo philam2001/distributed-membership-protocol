@@ -1,1 +1,1 @@
-# distributed-membership-protocol
+# Distributed Membership Protocol
