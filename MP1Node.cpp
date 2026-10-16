@@ -170,6 +170,18 @@ int MP1Node::introduceSelfToGroup(Address *joinaddr)
         log->LOG(&memberNode->addr, "Starting up group...");
 #endif
         memberNode->inGroup = true;
+
+        // Add introducer to member list
+        MemberListEntry intr;
+        int id = *(int *)(&joinaddr->addr);
+        int port = *(short *)(&joinaddr->addr[4]);
+
+        intr.id = id;
+        intr.port = port;
+        intr.heartbeat = memberNode->heartbeat;
+        intr.timestamp = par->getcurrtime();
+
+        memberNode->memberList.push_back(intr);
     }
     else
     {
