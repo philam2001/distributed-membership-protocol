@@ -38,6 +38,9 @@ private:
 	Member *memberNode;
 	bool shouldDeleteMember;
 	char NULLADDR[6];
+	Address makeNewAddr(int id, short port);
+	void addToMemberList(const Address &a, long heartbeat);
+	bool isThisMe(const MemberListEntry &e);
 
 public:
 	/**

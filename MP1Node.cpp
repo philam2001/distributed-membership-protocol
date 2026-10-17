@@ -170,18 +170,7 @@ int MP1Node::introduceSelfToGroup(Address *joinaddr)
         log->LOG(&memberNode->addr, "Starting up group...");
 #endif
         memberNode->inGroup = true;
-
-        // Add introducer to member list
-        MemberListEntry intr;
-        int id = *(int *)(&joinaddr->addr);
-        int port = *(short *)(&joinaddr->addr[4]);
-
-        intr.id = id;
-        intr.port = port;
-        intr.heartbeat = memberNode->heartbeat;
-        intr.timestamp = par->getcurrtime();
-
-        memberNode->memberList.push_back(intr);
+        addToMemberList(*joinaddr, memberNode->heartbeat);
     }
     else
     {
@@ -292,16 +281,7 @@ bool MP1Node::recvCallBack(void *env, char *data, int size)
         memcpy(&heartbeat, (char *)(msg + 1) + 1 + sizeof(memberNode->addr.addr), sizeof(long));
 
         // 2. Add to member list
-        MemberListEntry entry;
-        int id = *(int *)(&sender.addr);
-        int port = *(short *)(&sender.addr[4]);
-
-        entry.id = id;
-        entry.port = port;
-        entry.heartbeat = heartbeat;
-        entry.timestamp = par->getcurrtime();
-
-        memberNode->memberList.push_back(entry);
+        addToMemberList(sender, heartbeat);
 
 #ifdef DEBUGLOG
         log->LOG(&memberNode->addr, "Read and added entry to member list");
@@ -332,7 +312,6 @@ bool MP1Node::recvCallBack(void *env, char *data, int size)
     }
     else if (msg->msgType == JOINREP)
     {
-        Address memberAddr;
         memberNode->inGroup = true;
 
 #ifdef DEBUGLOG
@@ -340,17 +319,17 @@ bool MP1Node::recvCallBack(void *env, char *data, int size)
 #endif
 
         int n = (size - sizeof(MessageHdr)) / sizeof(MemberListEntry);
-        MemberListEntry *entries = (MemberListEntry *)(msg + 1); // skip header
+        MemberListEntry *entriesRecv = (MemberListEntry *)(msg + 1); // skip header
 
+        // adding every new member into list
         for (int i = 0; i < n; ++i)
         {
-            // skip if member exists already
+            // skip if member exists already to help reduce false positives
             bool exists = false;
-            MemberListEntry *row = nullptr;
             for (auto &myEntry : memberNode->memberList)
             {
                 // find recv entry with entry in my membership
-                if (myEntry.id == entries[i].id && myEntry.port == entries[i].port)
+                if (myEntry.id == entriesRecv[i].id && myEntry.port == entriesRecv[i].port)
                 {
                     exists = true;
                     break; // stop looking through list and exit
@@ -360,54 +339,44 @@ bool MP1Node::recvCallBack(void *env, char *data, int size)
             if (exists)
                 continue; // don't add this row to my membership list
 
-            memcpy(&memberAddr.addr, &entries[i].id, sizeof(int));
-            memcpy(&memberAddr.addr[4], &entries[i].port, sizeof(short));
-            entries[i].timestamp = par->getcurrtime();
-            memberNode->memberList.push_back(entries[i]);
+            Address memberAddr = makeNewAddr(entriesRecv[i].id, entriesRecv[i].port);
+            addToMemberList(memberAddr, entriesRecv[i].heartbeat);
 
             if (memberAddr != memberNode->addr)
             {
-                // process adds new member and needs to log it
+                // log joins for other nodes
                 log->logNodeAdd(&memberNode->addr, &memberAddr);
             }
         }
     }
     else if (msg->msgType == GOSSIP)
     {
-        // my id and port for gossip
-        int id = *(int *)(&memberNode->addr.addr);
-        int port = *(short *)(&memberNode->addr.addr[4]);
-
         int n = (size - sizeof(MessageHdr)) / sizeof(MemberListEntry);
         MemberListEntry *entriesRecv = (MemberListEntry *)(msg + 1); // skip header
 
         for (int i = 0; i < n; ++i)
         {
             // skip my own row in membership list I received
-            if (entriesRecv[i].id == id && entriesRecv[i].port == port)
+            if (isThisMe(entriesRecv[i]))
                 continue;
 
             MemberListEntry *row = nullptr;
             for (auto &myEntry : memberNode->memberList)
             {
-                // find recv entry with entry in my membership
+                // try to find recv entry with entry in my membership
                 if (myEntry.id == entriesRecv[i].id && myEntry.port == entriesRecv[i].port)
                 {
                     row = &myEntry;
+                    break;
                 }
             }
 
+            // add to membership list if recv entry not in my membership list
             if (row == nullptr)
             {
                 // new member in recv entries so create new entry
-                Address memberAddr;
-                memcpy(&memberAddr.addr, &entriesRecv[i].id, sizeof(int));
-                memcpy(&memberAddr.addr[4], &entriesRecv[i].port, sizeof(short));
-
-                MemberListEntry entry = entriesRecv[i];
-                entry.timestamp = par->getcurrtime(); // update timestamp
-
-                memberNode->memberList.push_back(entry);
+                Address memberAddr = makeNewAddr(entriesRecv[i].id, entriesRecv[i].port);
+                addToMemberList(memberAddr, entriesRecv[i].heartbeat);
 
                 // log new addition
                 log->logNodeAdd(&memberNode->addr, &memberAddr);
@@ -416,16 +385,13 @@ bool MP1Node::recvCallBack(void *env, char *data, int size)
                 log->LOG(&memberNode->addr, "Add entry to member list");
 #endif
             }
-            else if (par->getcurrtime() - row->timestamp > TFAIL)
-            {
-                continue;
-            }
             else if (entriesRecv[i].heartbeat > row->heartbeat)
             {
                 // replace my heartbeat for this row with the receiver and update time
                 row->heartbeat = entriesRecv[i].heartbeat;
                 row->timestamp = par->getcurrtime();
             }
+            // otherwise no need for change
         }
     }
 
@@ -445,14 +411,13 @@ void MP1Node::nodeLoopOps()
 {
     memberNode->heartbeat++;
     auto entry = memberNode->memberList.begin();
+
     // remove failed nodes from propagation so that I'm not sending failed notes
     vector<MemberListEntry> currNodesAlive;
 
     while (entry != memberNode->memberList.end())
     {
-        Address memberAddr;
-        memcpy(&memberAddr.addr, &entry->id, sizeof(int));
-        memcpy(&memberAddr.addr[4], &entry->port, sizeof(short));
+        Address memberAddr = makeNewAddr(entry->id, entry->port);
 
         if (memberAddr == memberNode->addr)
         {
@@ -485,7 +450,8 @@ void MP1Node::nodeLoopOps()
         }
     }
 
-    // propogate membership list with gossip -> sends its membership list to a few of its neighbors
+    // propogate membership list with gossip -> sends its current alive membership list (currNodesAlive)
+    // to a few of its neighbors
     size_t memberListSize = sizeof(MemberListEntry) * currNodesAlive.size();
     size_t msgsize = sizeof(MessageHdr) + memberListSize;
     MessageHdr *gossipMsg = (MessageHdr *)malloc(msgsize);
@@ -493,24 +459,17 @@ void MP1Node::nodeLoopOps()
     gossipMsg->msgType = GOSSIP;
     memcpy((char *)(gossipMsg + 1), currNodesAlive.data(), memberListSize);
 
-    int id = *(int *)(&memberNode->addr.addr);
-    int port = *(short *)(&memberNode->addr.addr[4]);
-
     for (int neighbor = 0; neighbor < NEIGHBORS; ++neighbor)
     {
         // randomize so no clustering
         int randomNeighbor = rand() % currNodesAlive.size();
         MemberListEntry &row = currNodesAlive[randomNeighbor];
 
-        // skip if it generates me as neighbor
-        if (row.id == id && row.port == port)
-        {
+        // skip if it generates me as the neighbor
+        if (isThisMe(row))
             continue;
-        }
 
-        Address neighborAddr;
-        memcpy(&neighborAddr.addr[0], &row.id, sizeof(int));
-        memcpy(&neighborAddr.addr[4], &row.port, sizeof(short));
+        Address neighborAddr = makeNewAddr(row.id, row.port);
 
         emulNet->ENsend(&memberNode->addr, &neighborAddr, (char *)gossipMsg, msgsize);
     }
@@ -564,4 +523,32 @@ void MP1Node::printAddress(Address *addr)
 {
     printf("%d.%d.%d.%d:%d \n", addr->addr[0], addr->addr[1], addr->addr[2],
            addr->addr[3], *(short *)&addr->addr[4]);
+}
+
+Address MP1Node::makeNewAddr(int id, short port)
+{
+    Address a;
+    // addresses has same size for id and port
+    memcpy(&a.addr, &id, sizeof(int));
+    memcpy(&a.addr[4], &port, sizeof(short));
+    return a;
+}
+
+void MP1Node::addToMemberList(const Address &a, long heartbeat)
+{
+    MemberListEntry e;
+    int id = *(int *)(&a.addr);
+    short port = *(short *)(&a.addr[4]);
+
+    e.id = id;
+    e.port = port;
+    e.heartbeat = heartbeat;
+    e.timestamp = par->getcurrtime();
+
+    memberNode->memberList.push_back(e);
+}
+
+bool MP1Node::isThisMe(const MemberListEntry &e)
+{
+    return e.id == *(int *)(&memberNode->addr.addr[0]) && e.port == *(short *)(&memberNode->addr.addr[4]);
 }
