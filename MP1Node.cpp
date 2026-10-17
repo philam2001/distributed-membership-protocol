@@ -214,9 +214,9 @@ int MP1Node::introduceSelfToGroup(Address *joinaddr)
  */
 int MP1Node::finishUpThisNode()
 {
-    /*
-     * Your code goes here
-     */
+    memberNode->memberList.clear();
+    memberNode->inGroup = false;
+    return 0;
 }
 
 /**
@@ -304,7 +304,7 @@ bool MP1Node::recvCallBack(void *env, char *data, int size)
         memberNode->memberList.push_back(entry);
 
 #ifdef DEBUGLOG
-        log->LOG(&memberNode->addr, "Read and added entry to membe list");
+        log->LOG(&memberNode->addr, "Read and added entry to member list");
 #endif
         // process adds member and needs to log it
         log->logNodeAdd(&memberNode->addr, &sender);
@@ -344,6 +344,22 @@ bool MP1Node::recvCallBack(void *env, char *data, int size)
 
         for (int i = 0; i < n; ++i)
         {
+            // skip if member exists already
+            bool exists = false;
+            MemberListEntry *row = nullptr;
+            for (auto &myEntry : memberNode->memberList)
+            {
+                // find recv entry with entry in my membership
+                if (myEntry.id == entries[i].id && myEntry.port == entries[i].port)
+                {
+                    exists = true;
+                    break; // stop looking through list and exit
+                }
+            }
+
+            if (exists)
+                continue; // don't add this row to my membership list
+
             memcpy(&memberAddr.addr, &entries[i].id, sizeof(int));
             memcpy(&memberAddr.addr[4], &entries[i].port, sizeof(short));
             entries[i].timestamp = par->getcurrtime();
@@ -395,6 +411,14 @@ bool MP1Node::recvCallBack(void *env, char *data, int size)
 
                 // log new addition
                 log->logNodeAdd(&memberNode->addr, &memberAddr);
+
+#ifdef DEBUGLOG
+                log->LOG(&memberNode->addr, "Add entry to member list");
+#endif
+            }
+            else if (par->getcurrtime() - row->timestamp > TFAIL)
+            {
+                continue;
             }
             else if (entriesRecv[i].heartbeat > row->heartbeat)
             {
@@ -421,6 +445,8 @@ void MP1Node::nodeLoopOps()
 {
     memberNode->heartbeat++;
     auto entry = memberNode->memberList.begin();
+    // remove failed nodes from propagation so that I'm not sending failed notes
+    vector<MemberListEntry> currNodesAlive;
 
     while (entry != memberNode->memberList.end())
     {
@@ -433,30 +459,39 @@ void MP1Node::nodeLoopOps()
             // don't delete myself, update new heartbeat and time
             entry->heartbeat = memberNode->heartbeat;
             entry->timestamp = par->getcurrtime();
+            currNodesAlive.push_back(*entry);
             ++entry;
             continue;
         }
 
+        long timeSinceAlive = par->getcurrtime() - entry->timestamp;
+
         // must wait a t cleanup (TREMOVE in this case) after TFAIL to delete row
-        if (par->getcurrtime() - entry->timestamp > TFAIL + TREMOVE)
+        if (timeSinceAlive > TFAIL + TREMOVE)
         {
             // log removal
             log->logNodeRemove(&memberNode->addr, &memberAddr);
             entry = memberNode->memberList.erase(entry); // increments to next entry
+
+#ifdef DEBUGLOG
+            log->LOG(&memberNode->addr, "Deleted entry to member list");
+#endif
         }
         else
         {
+            if (timeSinceAlive <= TFAIL)
+                currNodesAlive.push_back(*entry);
             ++entry;
         }
     }
 
     // propogate membership list with gossip -> sends its membership list to a few of its neighbors
-    size_t memberListSize = sizeof(MemberListEntry) * memberNode->memberList.size();
+    size_t memberListSize = sizeof(MemberListEntry) * currNodesAlive.size();
     size_t msgsize = sizeof(MessageHdr) + memberListSize;
     MessageHdr *gossipMsg = (MessageHdr *)malloc(msgsize);
 
     gossipMsg->msgType = GOSSIP;
-    memcpy((char *)(gossipMsg + 1), memberNode->memberList.data(), memberListSize);
+    memcpy((char *)(gossipMsg + 1), currNodesAlive.data(), memberListSize);
 
     int id = *(int *)(&memberNode->addr.addr);
     int port = *(short *)(&memberNode->addr.addr[4]);
@@ -464,8 +499,8 @@ void MP1Node::nodeLoopOps()
     for (int neighbor = 0; neighbor < NEIGHBORS; ++neighbor)
     {
         // randomize so no clustering
-        int randomNeighbor = rand() % memberNode->memberList.size();
-        MemberListEntry &row = memberNode->memberList[randomNeighbor];
+        int randomNeighbor = rand() % currNodesAlive.size();
+        MemberListEntry &row = currNodesAlive[randomNeighbor];
 
         // skip if it generates me as neighbor
         if (row.id == id && row.port == port)
