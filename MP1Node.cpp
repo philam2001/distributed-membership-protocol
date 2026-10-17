@@ -276,8 +276,6 @@ void MP1Node::checkMessages()
 bool MP1Node::recvCallBack(void *env, char *data, int size)
 {
     MessageHdr *msg = (MessageHdr *)data;
-    Address sender;
-    long heartbeat;
 
 #ifdef DEBUGLOG
     static char s[1024];
@@ -285,7 +283,10 @@ bool MP1Node::recvCallBack(void *env, char *data, int size)
 
     if (msg->msgType == JOINREQ)
     {
-        // 1. Read addr and hearbeat message
+        Address sender;
+        long heartbeat;
+
+        // 1. Read addr and hearbeat message, skip header
         memcpy(sender.addr, (char *)(msg + 1), sizeof(memberNode->addr.addr));
         memcpy(&heartbeat, (char *)(msg + 1) + 1 + sizeof(memberNode->addr.addr), sizeof(long));
 
@@ -327,6 +328,32 @@ bool MP1Node::recvCallBack(void *env, char *data, int size)
         // send JOINREP message back to the joining node
         emulNet->ENsend(&memberNode->addr, &sender, (char *)msgResponse, msgsize);
         free(msgResponse);
+    }
+    else if (msg->msgType == JOINREP)
+    {
+        Address sender;
+        memberNode->inGroup = true;
+
+#ifdef DEBUGLOG
+        log->LOG(&memberNode->addr, "Joined group");
+#endif
+
+        int n = (size - sizeof(MessageHdr)) / sizeof(MemberListEntry);
+        MemberListEntry *entries = (MemberListEntry *)(msg + 1); // skip header
+
+        for (int i = 0; i < n; ++i)
+        {
+            memcpy(&sender.addr[0], &entries[i].id, sizeof(int));
+            memcpy(&sender.addr[4], &entries[i].port, sizeof(short));
+            entries[i].timestamp = par->getcurrtime();
+            memberNode->memberList.push_back(entries[i]);
+
+            if (sender != memberNode->addr)
+            {
+                // process adds new member and needs to log it
+                log->logNodeAdd(&memberNode->addr, &sender);
+            }
+        }
     }
 
     free(msg);
