@@ -275,6 +275,7 @@ void MP1Node::checkMessages()
  */
 bool MP1Node::recvCallBack(void *env, char *data, int size)
 {
+    // TODO:encapsulate
     MessageHdr *msg = (MessageHdr *)data;
 
 #ifdef DEBUGLOG
@@ -331,7 +332,7 @@ bool MP1Node::recvCallBack(void *env, char *data, int size)
     }
     else if (msg->msgType == JOINREP)
     {
-        Address sender;
+        Address memberAddr;
         memberNode->inGroup = true;
 
 #ifdef DEBUGLOG
@@ -343,15 +344,63 @@ bool MP1Node::recvCallBack(void *env, char *data, int size)
 
         for (int i = 0; i < n; ++i)
         {
-            memcpy(&sender.addr[0], &entries[i].id, sizeof(int));
-            memcpy(&sender.addr[4], &entries[i].port, sizeof(short));
+            memcpy(&memberAddr.addr, &entries[i].id, sizeof(int));
+            memcpy(&memberAddr.addr[4], &entries[i].port, sizeof(short));
             entries[i].timestamp = par->getcurrtime();
             memberNode->memberList.push_back(entries[i]);
 
-            if (sender != memberNode->addr)
+            if (memberAddr != memberNode->addr)
             {
                 // process adds new member and needs to log it
-                log->logNodeAdd(&memberNode->addr, &sender);
+                log->logNodeAdd(&memberNode->addr, &memberAddr);
+            }
+        }
+    }
+    else if (msg->msgType == GOSSIP)
+    {
+        // my id and port for gossip
+        int id = *(int *)(&memberNode->addr.addr);
+        int port = *(short *)(&memberNode->addr.addr[4]);
+
+        int n = (size - sizeof(MessageHdr)) / sizeof(MemberListEntry);
+        MemberListEntry *entriesRecv = (MemberListEntry *)(msg + 1); // skip header
+
+        for (int i = 0; i < n; ++i)
+        {
+            // skip my own row in membership list I received
+            if (entriesRecv[i].id == id && entriesRecv[i].port == port)
+                continue;
+
+            MemberListEntry *row = nullptr;
+            for (auto &myEntry : memberNode->memberList)
+            {
+                // find recv entry with entry in my membership
+                if (myEntry.id == entriesRecv[i].id && myEntry.port == entriesRecv[i].port)
+                {
+                    row = &myEntry;
+                }
+            }
+
+            if (row == nullptr)
+            {
+                // new member in recv entries so create new entry
+                Address memberAddr;
+                memcpy(&memberAddr.addr, &entriesRecv[i].id, sizeof(int));
+                memcpy(&memberAddr.addr[4], &entriesRecv[i].port, sizeof(short));
+
+                MemberListEntry entry = entriesRecv[i];
+                entry.timestamp = par->getcurrtime(); // update timestamp
+
+                memberNode->memberList.push_back(entry);
+
+                // log new addition
+                log->logNodeAdd(&memberNode->addr, &memberAddr);
+            }
+            else if (entriesRecv[i].heartbeat > row->heartbeat)
+            {
+                // replace my heartbeat for this row with the receiver and update time
+                row->heartbeat = entriesRecv[i].heartbeat;
+                row->timestamp = par->getcurrtime();
             }
         }
     }
@@ -370,10 +419,68 @@ bool MP1Node::recvCallBack(void *env, char *data, int size)
  */
 void MP1Node::nodeLoopOps()
 {
+    memberNode->heartbeat++;
+    auto entry = memberNode->memberList.begin();
 
-    /*
-     * Your code goes here
-     */
+    while (entry != memberNode->memberList.end())
+    {
+        Address memberAddr;
+        memcpy(&memberAddr.addr, &entry->id, sizeof(int));
+        memcpy(&memberAddr.addr[4], &entry->port, sizeof(short));
+
+        if (memberAddr == memberNode->addr)
+        {
+            // don't delete myself, update new heartbeat and time
+            entry->heartbeat = memberNode->heartbeat;
+            entry->timestamp = par->getcurrtime();
+            ++entry;
+            continue;
+        }
+
+        // must wait a t cleanup (TREMOVE in this case) after TFAIL to delete row
+        if (par->getcurrtime() - entry->timestamp > TFAIL + TREMOVE)
+        {
+            // log removal
+            log->logNodeRemove(&memberNode->addr, &memberAddr);
+            entry = memberNode->memberList.erase(entry); // increments to next entry
+        }
+        else
+        {
+            ++entry;
+        }
+    }
+
+    // propogate membership list with gossip -> sends its membership list to a few of its neighbors
+    size_t memberListSize = sizeof(MemberListEntry) * memberNode->memberList.size();
+    size_t msgsize = sizeof(MessageHdr) + memberListSize;
+    MessageHdr *gossipMsg = (MessageHdr *)malloc(msgsize);
+
+    gossipMsg->msgType = GOSSIP;
+    memcpy((char *)(gossipMsg + 1), memberNode->memberList.data(), memberListSize);
+
+    int id = *(int *)(&memberNode->addr.addr);
+    int port = *(short *)(&memberNode->addr.addr[4]);
+
+    for (int neighbor = 0; neighbor < NEIGHBORS; ++neighbor)
+    {
+        // randomize so no clustering
+        int randomNeighbor = rand() % memberNode->memberList.size();
+        MemberListEntry &row = memberNode->memberList[randomNeighbor];
+
+        // skip if it generates me as neighbor
+        if (row.id == id && row.port == port)
+        {
+            continue;
+        }
+
+        Address neighborAddr;
+        memcpy(&neighborAddr.addr[0], &row.id, sizeof(int));
+        memcpy(&neighborAddr.addr[4], &row.port, sizeof(short));
+
+        emulNet->ENsend(&memberNode->addr, &neighborAddr, (char *)gossipMsg, msgsize);
+    }
+
+    free(gossipMsg);
 
     return;
 }

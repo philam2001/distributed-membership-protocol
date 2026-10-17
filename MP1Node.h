@@ -22,13 +22,15 @@
  */
 #define TREMOVE 20
 #define TFAIL 5
+#define NEIGHBORS 4
 
 /**
  * CLASS NAME: MP1Node
  *
  * DESCRIPTION: Class implementing Membership protocol functionalities for failure detection
  */
-class MP1Node {
+class MP1Node
+{
 private:
 	EmulNet *emulNet;
 	Log *log;
@@ -38,16 +40,17 @@ private:
 	char NULLADDR[6];
 
 public:
-
 	/**
 	 * Message Types
 	 */
-	enum MsgTypes {
-	    JOINREQ,
-	    JOINREP,
-	    UPDATEREQ,
-	    UPDATEREP,
-	    DUMMYLASTMSGTYPE
+	enum MsgTypes
+	{
+		JOINREQ,
+		JOINREP,
+		GOSSIP,
+		UPDATEREQ,
+		UPDATEREP,
+		DUMMYLASTMSGTYPE,
 	};
 
 	/**
@@ -55,13 +58,15 @@ public:
 	 *
 	 * DESCRIPTION: Header and content of a message
 	 */
-	struct MessageHdr {
+	struct MessageHdr
+	{
 		MsgTypes msgType;
 	};
 
 	MP1Node(Params *params, EmulNet *emul, Log *log, Address *address);
 	MP1Node(Member *member, Params *params, EmulNet *emul, Log *log, Address *address);
-	Member * getMemberNode() {
+	Member *getMemberNode()
+	{
 		return memberNode;
 	}
 	int recvLoop();
