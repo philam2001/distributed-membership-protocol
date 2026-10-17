@@ -264,7 +264,6 @@ void MP1Node::checkMessages()
  */
 bool MP1Node::recvCallBack(void *env, char *data, int size)
 {
-    // TODO:encapsulate
     MessageHdr *msg = (MessageHdr *)data;
 
 #ifdef DEBUGLOG
@@ -283,11 +282,12 @@ bool MP1Node::recvCallBack(void *env, char *data, int size)
         // 2. Add to member list
         addToMemberList(sender, heartbeat);
 
-#ifdef DEBUGLOG
-        log->LOG(&memberNode->addr, "Read and added entry to member list");
-#endif
         // process adds member and needs to log it
         log->logNodeAdd(&memberNode->addr, &sender);
+
+#ifdef DEBUGLOG
+        log->LOG(&memberNode->addr, "Add entry to member list");
+#endif
 
         // 3. Respond with JOINREP
 
@@ -346,6 +346,10 @@ bool MP1Node::recvCallBack(void *env, char *data, int size)
             {
                 // log joins for other nodes
                 log->logNodeAdd(&memberNode->addr, &memberAddr);
+
+#ifdef DEBUGLOG
+                log->LOG(&memberNode->addr, "Add entry to member list");
+#endif
             }
         }
     }
@@ -417,9 +421,7 @@ void MP1Node::nodeLoopOps()
 
     while (entry != memberNode->memberList.end())
     {
-        Address memberAddr = makeNewAddr(entry->id, entry->port);
-
-        if (memberAddr == memberNode->addr)
+        if (isThisMe(*entry))
         {
             // don't delete myself, update new heartbeat and time
             entry->heartbeat = memberNode->heartbeat;
@@ -434,6 +436,7 @@ void MP1Node::nodeLoopOps()
         // must wait a t cleanup (TREMOVE in this case) after TFAIL to delete row
         if (timeSinceAlive > TFAIL + TREMOVE)
         {
+            Address memberAddr = makeNewAddr(entry->id, entry->port);
             // log removal
             log->logNodeRemove(&memberNode->addr, &memberAddr);
             entry = memberNode->memberList.erase(entry); // increments to next entry
@@ -528,7 +531,6 @@ void MP1Node::printAddress(Address *addr)
 Address MP1Node::makeNewAddr(int id, short port)
 {
     Address a;
-    // addresses has same size for id and port
     memcpy(&a.addr, &id, sizeof(int));
     memcpy(&a.addr[4], &port, sizeof(short));
     return a;
